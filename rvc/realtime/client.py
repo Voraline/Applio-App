@@ -12,6 +12,7 @@ from .core import VoiceChanger, AUDIO_SAMPLE_RATE
 
 try:
     from rvc.realtime.utils.pv_ext import is_cpp_available as _pv_avail
+
     _pv_avail()
     del _pv_avail
 except Exception:
@@ -296,7 +297,7 @@ async def websocket_audio(ws: WebSocket):
                 clean_audio=params["clean_audio"],
                 clean_strength=params["clean_strength"],
                 post_process=params["post_process"],
-                **params["kwargs"]
+                **params["kwargs"],
             )
 
         print("Realtime is ready!")

@@ -15,7 +15,7 @@ def _load():
 
     _dir = os.path.dirname(os.path.abspath(__file__))
     cpp_src = os.path.join(_dir, "pv_extension.cpp")
-    cu_src  = os.path.join(_dir, "pv_kernel.cu")
+    cu_src = os.path.join(_dir, "pv_kernel.cu")
 
     sources = [cpp_src]
     if os.name == "nt":
@@ -37,6 +37,7 @@ def _load():
 
     try:
         from torch.utils.cpp_extension import load
+
         _ext = load(
             name="pv_ext",
             sources=sources,
@@ -45,10 +46,14 @@ def _load():
             verbose=False,
         )
         _cpp_available = True
-        print("[Phase Vocoder] C++ extension loaded - using fast C++/CUDA phase vocoder")
+        print(
+            "[Phase Vocoder] C++ extension loaded - using fast C++/CUDA phase vocoder"
+        )
     except Exception as e:
         _cpp_available = False
-        print(f"[Phase Vocoder] C++ extension build failed - using Python/PyTorch fallback: {e}")
+        print(
+            f"[Phase Vocoder] C++ extension build failed - using Python/PyTorch fallback: {e}"
+        )
         _ext = None
 
     return _ext
@@ -60,9 +65,18 @@ def is_cpp_available() -> bool:
 
 
 def phase_vocoder_ext(
-    a, b, fade_out_sq, fade_in_sq, window,
-    window_over_n, k_grid_delta, t_over_n, inv_2pi, two_pi,
-    phia=None, absab=None,
+    a,
+    b,
+    fade_out_sq,
+    fade_in_sq,
+    window,
+    window_over_n,
+    k_grid_delta,
+    t_over_n,
+    inv_2pi,
+    two_pi,
+    phia=None,
+    absab=None,
 ):
     global _pv_path_reported
     ext = _load()
@@ -78,9 +92,15 @@ def phase_vocoder_ext(
         return None
     try:
         return ext.phase_vocoder_synth(
-            a, b, fade_out_sq, fade_in_sq,
+            a,
+            b,
+            fade_out_sq,
+            fade_in_sq,
             window_over_n,
-            k_grid_delta, t_over_n, phia, absab,
+            k_grid_delta,
+            t_over_n,
+            phia,
+            absab,
         )
     except Exception:
         return None

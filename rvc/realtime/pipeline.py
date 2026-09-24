@@ -378,9 +378,7 @@ class Realtime_Pipeline:
             feats = torch.cat((feats, feats[:, -1:, :]), 1)
             # make a copy for pitch guidance and protection only when needed
             need_feats0 = (
-                self.use_f0
-                and protect < 0.5
-                and bool(self.index and index_rate > 0)
+                self.use_f0 and protect < 0.5 and bool(self.index and index_rate > 0)
             )
             feats0 = feats.clone() if need_feats0 else None
 

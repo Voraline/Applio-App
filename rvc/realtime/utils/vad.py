@@ -46,7 +46,9 @@ class VADProcessor:
 
         # Convert float32 audio to int16 PCM
         # WebRTC VAD expects 16-bit linear PCM audio.
-        audio_chunk_int16 = (np.clip(audio_chunk_float32, -1.0, 1.0) * 32767).astype(np.int16)
+        audio_chunk_int16 = (np.clip(audio_chunk_float32, -1.0, 1.0) * 32767).astype(
+            np.int16
+        )
 
         num_frames = len(audio_chunk_int16) // self.frame_length
         if num_frames == 0 and len(audio_chunk_int16) > 0:

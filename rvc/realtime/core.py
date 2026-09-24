@@ -99,9 +99,18 @@ def phase_vocoder(
     # ---- Fast path: fused CUDA kernel (no N×K matrix) -----------------------
     if a.is_cuda:
         result = _pv_ext(
-            a, b, fade_out_sq, fade_in_sq, window,
-            window_over_n, k_grid_delta, t_over_n, inv_2pi, two_pi,
-            phia=phia, absab=absab,
+            a,
+            b,
+            fade_out_sq,
+            fade_in_sq,
+            window,
+            window_over_n,
+            k_grid_delta,
+            t_over_n,
+            inv_2pi,
+            two_pi,
+            phia=phia,
+            absab=absab,
         )
         if result is not None:
             return result
@@ -111,11 +120,7 @@ def phase_vocoder(
     phase = torch.outer(t_over_n, k_grid_delta) + phia
     synthesized = torch.mv(phase.cos(), absab)
 
-    return (
-        a * fade_out_sq
-        + b * fade_in_sq
-        + synthesized * window_over_n
-    )
+    return a * fade_out_sq + b * fade_in_sq + synthesized * window_over_n
 
 
 class Realtime:
@@ -320,6 +325,7 @@ class Realtime:
         Called automatically by realloc() when CUDA is available.
         """
         import gc
+
         pipeline = self.pipeline
         if pipeline is None:
             return
@@ -356,8 +362,12 @@ class Realtime:
                     pass
                 # RMVPE warmup
                 try:
-                    if pipeline.f0_model is not None and hasattr(pipeline.f0_model, "model"):
-                        mel = pipeline.f0_model.model.mel_extractor(dummy_16k.unsqueeze(0))
+                    if pipeline.f0_model is not None and hasattr(
+                        pipeline.f0_model, "model"
+                    ):
+                        mel = pipeline.f0_model.model.mel_extractor(
+                            dummy_16k.unsqueeze(0)
+                        )
                         _ = pipeline.f0_model.model.mel2hidden(mel)
                 except Exception:
                     pass
@@ -603,7 +613,9 @@ class VoiceChanger:
         self.pv_window_over_n = self.pv_window / n
         self.pv_t_over_n = torch.arange(n, device=self.device, dtype=torch.float32) / n
         self.pv_k_grid = (
-            2 * torch.pi * torch.arange(n // 2 + 1, device=self.device, dtype=torch.float32)
+            2
+            * torch.pi
+            * torch.arange(n // 2 + 1, device=self.device, dtype=torch.float32)
         )
         self.pv_inv_2pi = 1.0 / (2 * torch.pi)
         self.pv_two_pi = 2 * torch.pi
@@ -616,7 +628,9 @@ class VoiceChanger:
         )
         if self.device.startswith("cuda") and torch.cuda.is_available():
             try:
-                _dummy = torch.zeros(self.crossfade_frame, device=self.device, dtype=torch.float32)
+                _dummy = torch.zeros(
+                    self.crossfade_frame, device=self.device, dtype=torch.float32
+                )
                 phase_vocoder(
                     _dummy,
                     _dummy,
