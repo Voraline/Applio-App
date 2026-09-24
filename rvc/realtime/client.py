@@ -10,6 +10,13 @@ sys.path.append(now_dir)
 
 from .core import VoiceChanger, AUDIO_SAMPLE_RATE
 
+try:
+    from rvc.realtime.utils.pv_ext import is_cpp_available as _pv_avail
+    _pv_avail()
+    del _pv_avail
+except Exception:
+    pass
+
 app = FastAPI()
 vc_instance = None
 params = {}
@@ -321,12 +328,17 @@ async def websocket_audio(ws: WebSocket):
                 proposed_pitch_threshold=params["proposed_pitch_threshold"],
             )
 
-            await ws.send_text(
-                json.dumps({"type": "latency", "value": perf[1], "volume": vol})
-            )
-            await ws.send_bytes(audio_output.tobytes())
-    except WebSocketDisconnect:
+            try:
+                await ws.send_text(
+                    json.dumps({"type": "latency", "value": perf[1], "volume": vol})
+                )
+                await ws.send_bytes(audio_output.tobytes())
+            except (RuntimeError, WebSocketDisconnect):
+                break
+    except (WebSocketDisconnect, RuntimeError):
         print("[WS] Disconnected!")
+    except Exception as e:
+        print(f"[WS] Error: {e}")
     finally:
         if vc_instance is not None:
             del vc_instance
@@ -336,5 +348,5 @@ async def websocket_audio(ws: WebSocket):
 
         try:
             await ws.close()
-        except:
+        except Exception:
             pass

@@ -26,12 +26,32 @@ sys.path.append(now_dir)
 from rvc.realtime.utils.torch import circular_write
 from rvc.realtime.utils.vad import VADProcessor
 from rvc.realtime.pipeline import create_pipeline
+from rvc.realtime.utils.pv_ext import phase_vocoder_ext as _pv_ext
 
 SAMPLE_RATE = 16000
 AUDIO_SAMPLE_RATE = 48000
 
 
-def phase_vocoder(a, b, fade_out, fade_in):
+if torch.cuda.is_available():
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+
+def phase_vocoder(
+    a,
+    b,
+    fade_out,
+    fade_in,
+    fade_out_sq=None,
+    fade_in_sq=None,
+    window=None,
+    window_over_n=None,
+    k_grid=None,
+    t_over_n=None,
+    inv_2pi=None,
+    two_pi=None,
+):
     """
     Performs a phase vocoder crossfade between two audio segments.
 
@@ -49,49 +69,52 @@ def phase_vocoder(a, b, fade_out, fade_in):
         torch.Tensor: The crossfaded audio segment.
     """
 
-    # Compute the analysis window as the geometric mean of fade curves
-    window = (fade_out * fade_in).sqrt()
-    # Transform both windowed segments to the frequency domain (Real FFT)
+    n = a.shape[0]
+    if window is None:
+        window = (fade_out * fade_in).sqrt()
+        window_over_n = window / n
+        fade_out_sq = fade_out**2
+        fade_in_sq = fade_in**2
+        k_grid = 2 * torch.pi * torch.arange(n // 2 + 1, device=a.device, dtype=a.dtype)
+        t_over_n = torch.arange(n, device=a.device, dtype=a.dtype) / n
+        inv_2pi = 1.0 / (2 * torch.pi)
+        two_pi = 2 * torch.pi
+
+    # ---- Shared: FFT + phase extraction + energy correction -----------------
     fa = torch.fft.rfft(a * window)
     fb = torch.fft.rfft(b * window)
-    # Calculate the combined magnitude spectrum
     absab = fa.abs() + fb.abs()
-    n = a.shape[0]
 
-    # Compensate for the energy of negative frequencies (except DC and Nyquist components)
+    # Compensate for the energy of negative frequencies (except DC and Nyquist)
     if n % 2 == 0:
         absab[1:-1] *= 2
     else:
         absab[1:] *= 2
 
-    # Extract initial phase and calculate the raw phase difference
     phia = fa.angle()
     deltaphase = fb.angle() - phia
+    delta_unwrapped = deltaphase - two_pi * torch.floor(deltaphase * inv_2pi + 0.5)
+    k_grid_delta = k_grid + delta_unwrapped  # [K]
 
-    # Reconstruct the signal using a combination of time-domain crossfade
-    # and phase-aligned sinusoidal synthesis (Phase Vocoder)
+    # ---- Fast path: fused CUDA kernel (no N×K matrix) -----------------------
+    if a.is_cuda:
+        result = _pv_ext(
+            a, b, fade_out_sq, fade_in_sq, window,
+            window_over_n, k_grid_delta, t_over_n, inv_2pi, two_pi,
+            phia=phia, absab=absab,
+        )
+        if result is not None:
+            return result
+        # Extension unavailable — fall through to Python path
+
+    # ---- Python fallback: standard torch ops --------------------------------
+    phase = torch.outer(t_over_n, k_grid_delta) + phia
+    synthesized = torch.mv(phase.cos(), absab)
+
     return (
-        a * (fade_out**2)
-        + b * (fade_in**2)
-        + (
-            absab
-            * (
-                (
-                    # Base frequency grid for each bin
-                    2 * torch.pi * torch.arange(n // 2 + 1).to(a)
-                    +
-                    # Phase unwrapping (wrapping delta phase to the [-pi, pi] range)
-                    (
-                        deltaphase
-                        - 2 * torch.pi * (deltaphase / 2 / torch.pi + 0.5).floor()
-                    )
-                )
-                * (torch.arange(n).unsqueeze(-1).to(a) / n)
-                + phia  # Continuous phase evolution over time
-            ).cos()
-        ).sum(-1)
-        * window
-        / n  # Sum the sinusoidal components (IFFT equivalent) and normalize
+        a * fade_out_sq
+        + b * fade_in_sq
+        + synthesized * window_over_n
     )
 
 
@@ -286,6 +309,63 @@ class Realtime:
             self.convert_feature_size_16k + 1, dtype=self.dtype, device=self.device
         )
 
+        # Trigger torch.compile tracing/autotuning now so first live block is fast.
+        if self.device.startswith("cuda") and torch.cuda.is_available():
+            self._compile_warmup()
+
+    def _compile_warmup(self):
+        """
+        Run dummy passes through compiled models so torch.compile finishes
+        tracing/autotuning before the first live audio block arrives.
+        Called automatically by realloc() when CUDA is available.
+        """
+        import gc
+        pipeline = self.pipeline
+        if pipeline is None:
+            return
+        device = self.device
+        dtype = self.dtype
+
+        # Dummy shapes matching realistic realtime sizes
+        T_feats = self.convert_feature_size_16k
+        T_audio = self.convert_buffer.shape[0]
+        # Use the model's actual embedding dim (256 for v1, 768 for v2)
+        feat_dim = getattr(pipeline.vc, "text_enc_hidden_dim", 256)
+
+        dummy_audio = torch.zeros(1, T_audio, device=device, dtype=dtype)
+        dummy_feats = torch.zeros(1, T_feats, feat_dim, device=device, dtype=dtype)
+        dummy_pitch = torch.zeros(1, T_feats, device=device, dtype=torch.int64)
+        dummy_pitchf = torch.zeros(1, T_feats, device=device, dtype=dtype)
+        dummy_sid = torch.zeros(1, device=device, dtype=torch.int64)
+        dummy_p_len = torch.tensor([T_feats], device=device, dtype=torch.int64)
+        dummy_16k = torch.zeros(T_audio, device=device, dtype=dtype)
+
+        with torch.inference_mode():
+            for _ in range(3):
+                # Hubert embedding warmup
+                try:
+                    _ = pipeline.hubert_model(dummy_audio)
+                except Exception:
+                    pass
+                # net_g synthesizer warmup
+                try:
+                    _ = pipeline.vc.net_g.infer(
+                        dummy_feats, dummy_p_len, dummy_pitch, dummy_pitchf, dummy_sid
+                    )
+                except Exception:
+                    pass
+                # RMVPE warmup
+                try:
+                    if pipeline.f0_model is not None and hasattr(pipeline.f0_model, "model"):
+                        mel = pipeline.f0_model.model.mel_extractor(dummy_16k.unsqueeze(0))
+                        _ = pipeline.f0_model.model.mel2hidden(mel)
+                except Exception:
+                    pass
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def inference(
         self,
         audio_input: np.ndarray,
@@ -303,11 +383,11 @@ class Realtime:
 
         # Input audio is always float32
         audio_input_16k = self.resample_in(
-            torch.as_tensor(audio_input, dtype=torch.float32, device=self.device)
+            torch.from_numpy(audio_input).to(self.device, non_blocking=True)
         ).to(self.dtype)
         circular_write(audio_input_16k, self.audio_buffer)
 
-        vol_t = torch.sqrt(torch.square(self.audio_buffer).mean())
+        vol_t = self.audio_buffer.norm() * (1.0 / self.audio_buffer.numel() ** 0.5)
         vol = max(vol_t.item(), 0)
 
         board = self.board
@@ -434,7 +514,8 @@ class Realtime:
         return audio_out, vol, False
 
     def __del__(self):
-        del self.pipeline
+        if hasattr(self, "pipeline"):
+            del self.pipeline
 
 
 class VoiceChanger:
@@ -515,13 +596,44 @@ class VoiceChanger:
         )
 
         self.fade_out_window: torch.Tensor = 1 - self.fade_in_window
+        self.fade_in_sq = self.fade_in_window**2
+        self.fade_out_sq = self.fade_out_window**2
+        self.pv_window = (self.fade_out_window * self.fade_in_window).sqrt()
+        n = self.crossfade_frame
+        self.pv_window_over_n = self.pv_window / n
+        self.pv_t_over_n = torch.arange(n, device=self.device, dtype=torch.float32) / n
+        self.pv_k_grid = (
+            2 * torch.pi * torch.arange(n // 2 + 1, device=self.device, dtype=torch.float32)
+        )
+        self.pv_inv_2pi = 1.0 / (2 * torch.pi)
+        self.pv_two_pi = 2 * torch.pi
+
         self.sola_denominator_kernel = torch.ones(
             1, 1, self.crossfade_frame, device=self.device, dtype=torch.float32
         )
-        # The size will change from the previous result, so the record will be deleted.
         self.sola_buffer = torch.zeros(
             self.crossfade_frame, device=self.device, dtype=torch.float32
         )
+        if self.device.startswith("cuda") and torch.cuda.is_available():
+            try:
+                _dummy = torch.zeros(self.crossfade_frame, device=self.device, dtype=torch.float32)
+                phase_vocoder(
+                    _dummy,
+                    _dummy,
+                    self.fade_out_window,
+                    self.fade_in_window,
+                    self.fade_out_sq,
+                    self.fade_in_sq,
+                    self.pv_window,
+                    self.pv_window_over_n,
+                    self.pv_k_grid,
+                    self.pv_t_over_n,
+                    self.pv_inv_2pi,
+                    self.pv_two_pi,
+                )
+                del _dummy
+            except Exception:
+                pass
 
     def setup_soundfile_record(self):
         import soundfile as sf
@@ -593,6 +705,14 @@ class VoiceChanger:
                 audio[: self.crossfade_frame],
                 self.fade_out_window,
                 self.fade_in_window,
+                self.fade_out_sq,
+                self.fade_in_sq,
+                self.pv_window,
+                self.pv_window_over_n,
+                self.pv_k_grid,
+                self.pv_t_over_n,
+                self.pv_inv_2pi,
+                self.pv_two_pi,
             )
         else:
             if is_onset:
@@ -641,7 +761,7 @@ class VoiceChanger:
 
         return audio_output, vol
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def on_request(
         self,
         audio_input: np.ndarray,

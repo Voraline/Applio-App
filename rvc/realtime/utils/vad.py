@@ -22,6 +22,7 @@ class VADProcessor:
         self.vad = webrtcvad.Vad(sensitivity_mode)
         self.sample_rate = sample_rate
         self.frame_length = int(sample_rate * (frame_duration_ms / 1000.0))
+        # print(f"VAD Initialized: SR={sample_rate}, Frame Duration={frame_duration_ms}ms, Frame Length={self.frame_length} samples")
 
     def is_speech(self, audio_chunk_float32):
         """
@@ -45,13 +46,7 @@ class VADProcessor:
 
         # Convert float32 audio to int16 PCM
         # WebRTC VAD expects 16-bit linear PCM audio.
-        if np.max(np.abs(audio_chunk_float32)) > 1.0:
-            # print(
-            #     f"VAD Warning: Input audio chunk has values outside [-1.0, 1.0]: min={np.min(audio_chunk_float32)}, max={np.max(audio_chunk_float32)}. Clipping."
-            # )
-            audio_chunk_float32 = np.clip(audio_chunk_float32, -1.0, 1.0)
-
-        audio_chunk_int16 = (audio_chunk_float32 * 32767).astype(np.int16)
+        audio_chunk_int16 = (np.clip(audio_chunk_float32, -1.0, 1.0) * 32767).astype(np.int16)
 
         num_frames = len(audio_chunk_int16) // self.frame_length
         if num_frames == 0 and len(audio_chunk_int16) > 0:
