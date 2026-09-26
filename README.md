@@ -34,6 +34,12 @@
   <a href="https://colab.research.google.com/github/IAHispano/Applio-app/blob/main/assets/Applio_NoUI.ipynb" target="_blank">💻 Colab (No UI)</a>
 </p>
 
+<p align="center">
+  <img src="assets/demo.gif" alt="Applio App Showcase" width="100%" style="border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);">
+</p>
+<p align="center">
+  <em>🎬 Applio Studio walkthrough showcase (<a href="assets/demo.mp4?raw=true">Watch MP4</a> • <a href="assets/demo.webm?raw=true">WebM</a>)</em>
+</p>
 
 ## Introduction
 

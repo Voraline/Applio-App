@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import cors from "cors";
 import express from "express";
+import { startStorageCleaner } from "@/cleaner";
 import { killJobTree } from "@/cli";
 import { errMsg } from "@/errors";
 import { getJob, setError } from "@/jobs";
@@ -23,7 +24,6 @@ import inferenceRouter from "@/routes/inference";
 import jobsRouter from "@/routes/jobs";
 import modelsRouter from "@/routes/models";
 import pluginsRouter from "@/routes/plugins";
-import presetsRouter from "@/routes/presets";
 import realtimeRouter, { attachRealtimeProxy } from "@/routes/realtime";
 import reportRouter from "@/routes/report";
 import settingsRouter, { autoStartPresence, stopPresence } from "@/routes/settings";
@@ -120,7 +120,6 @@ app.get("/api/diagnostics", async (_req, res) => {
 app.use("/api/models", modelsRouter);
 app.use("/api/inference/batch", batchRouter); // before /api/inference (more specific first)
 app.use("/api/inference", inferenceRouter);
-app.use("/api/presets", presetsRouter);
 app.use("/api/tts", ttsRouter);
 app.use("/api/voice-blender", blenderRouter);
 app.use("/api/download", downloadRouter);
@@ -169,6 +168,8 @@ const server = app.listen(PORT, "127.0.0.1", () => {
   // Warm the inference worker (CUDA context + default embedder) in the
   // background so the first conversion doesn't pay one-time load costs.
   inferenceWorker.warmupDelayed();
+  // Automatically clean expired temporary audio files and uploads
+  startStorageCleaner();
 });
 
 // Realtime audio frames ride raw WebSockets (Next rewrites don't proxy upgrades),

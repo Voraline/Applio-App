@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { type Request, type Response, Router } from "express";
 import { z } from "zod";
+import { cleanStorage, getStorageStats } from "@/cleaner";
 import { errMsg } from "@/errors";
 import { getAppVersion, getPythonGuiBin, getRepoRoot, getUploadsDir, noEnv, pythonEnv } from "@/python";
 
@@ -104,17 +105,6 @@ function deepMerge(base: JsonObject, over: JsonObject): JsonObject {
 }
 function saveConfig(cfg: JsonObject) {
   fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2));
-}
-
-// Single source of truth for the installed app version: the root
-// package.json (bumped with releases). The mutable assets/config.json
-// "version" field goes stale (user values override the template merge) and
-// must never drive update comparisons. Delegates to getAppVersion() which
-// checks APPLIO_CODE_ROOT first — in the packaged app getRepoRoot() is the
-// writable data dir (no package.json there) while the real version ships in
-// the read-only code dir (resources/app).
-function readPackageVersion(): string {
-  return getAppVersion();
 }
 
 const settingsSchema = z.object({
@@ -336,6 +326,28 @@ router.post("/restart", (_req: Request, res: Response) => {
   setTimeout(() => process.exit(0), 500).unref?.();
 });
 
+// Storage and cache management
+router.get("/storage", (_req: Request, res: Response) => {
+  try {
+    const stats = getStorageStats();
+    res.json({ stats });
+  } catch (err) {
+    res.status(500).json({ error: errMsg(err) });
+  }
+});
+
+router.post("/storage/clean", (req: Request, res: Response) => {
+  try {
+    const maxAgeMs = typeof req.body?.maxAgeMs === "number" ? req.body.maxAgeMs : 0;
+    const cleanUploads = req.body?.cleanUploads !== false;
+    const cleanOutputs = req.body?.cleanOutputs !== false;
+    const result = cleanStorage({ maxAgeMs, cleanUploads, cleanOutputs });
+    res.json({ ok: true, result });
+  } catch (err) {
+    res.status(500).json({ error: errMsg(err) });
+  }
+});
+
 // Theme system (Gradio themes parity, ours is file-based: assets/themes/*.json).
 // The built-in default lives in globals.css :root; selecting "" restores it.
 function themesDir(): string {
@@ -426,7 +438,7 @@ router.get("/theme", (req: Request, res: Response) => {
 
 router.get("/version-check", async (_req: Request, res: Response) => {
   try {
-    const local = readPackageVersion();
+    const local = getAppVersion();
     const headers: Record<string, string> = { "User-Agent": "Applio" };
     // Authenticated requests get 5k/hr instead of 60 — avoids the 403 wall.
     if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
@@ -558,7 +570,7 @@ router.get("/version-check", async (_req: Request, res: Response) => {
 // show the real version even when the GitHub comparison fails (offline,
 // rate-limited).
 router.get("/version", (_req: Request, res: Response) => {
-  res.json({ version: readPackageVersion() });
+  res.json({ version: getAppVersion() });
 });
 
 router.post("/apply-update", async (_req: Request, res: Response) => {
@@ -581,7 +593,7 @@ router.post("/apply-update", async (_req: Request, res: Response) => {
       try {
         // Sync the (display-only) config version with the real installed
         // version so every surface agrees after an update.
-        newVersion = readPackageVersion();
+        newVersion = getAppVersion();
         if (newVersion && newVersion !== "unknown") {
           const cfg = loadConfig();
           cfg.version = newVersion;
